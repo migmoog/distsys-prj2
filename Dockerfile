@@ -15,7 +15,8 @@ RUN cargo update
 RUN cargo build --release && rm -rf target/release/build
 
 # Copy the actual source code
-COPY . .
+COPY src/ src/
+COPY hostsfile.txt . # and the hostsfile!
 
 # Build the actual application
 RUN cargo build --release
@@ -33,7 +34,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy the compiled binary from the builder stage
-COPY --from=builder /usr/src/app/target/release/prj2 .
+COPY --from=builder /usr/src/app/target/release/passtoken .
 
 # Run the application by default
-CMD ["./prj2"]
+ENTRYPOINT ["./passtoken"]

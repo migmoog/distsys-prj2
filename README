@@ -1,4 +1,4 @@
 Project 2:
 
 I'm implementing this in rust 🦀
-
+(NOTE: setting up a rust environment for docker is quite complicated. It involves a lot of layer manipulation that I'm not too experienced with. My Dockerfile as it stands is a modified version of a chatgpt request)
