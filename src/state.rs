@@ -2,38 +2,43 @@ use std::fmt::Display;
 
 use crate::failures::Reasons;
 
+#[derive(Debug)]
 pub struct Data {
-    id: u32,
+    id: usize,
     state: u32,
-    predecessor: u32,
-    successor: u32,
+    predecessor: usize,
+    pub successor: usize,
 }
 
 impl Data {
-    pub fn from_list(hostname: &str, peer_list: &Vec<String>, state: u32) -> Result<Self, Reasons> {
+    pub fn from_list(
+        hostname: &str,
+        peer_list: &Vec<String>,
+        state: u32,
+    ) -> Result<(Self, usize, usize), Reasons> {
         // Pattern Matching + Iter chain hell
         // I love rust :-)
-        let Some((id, _)) = peer_list
-            .iter()
-            .enumerate()
-            .find(|(_, pname)| **pname == hostname)
-        else {
+        let Some(id) = peer_list.iter().position(|pname| *pname == hostname) else {
             return Err(Reasons::HostNotInHostsfile);
         };
 
-        let predecessor = if id == 0 { peer_list.len() - 1 } else { id - 1 };
-        let successor = if id == peer_list.len() - 1 { 0 } else { id + 1 };
+        let l = peer_list.len() - 1;
+        let predecessor = if id == 0 { l } else { id - 1 };
+        let successor = if id == l { 0 } else { id + 1 };
 
         // 1 based counting 🤷‍♂️
-        let (predecessor, id, successor) =
-            (predecessor as u32 + 1, id as u32 + 1, successor as u32 + 1);
+        let (predecessor, id, successor) = (predecessor + 1, id + 1, successor + 1);
 
-        Ok(Data {
-            id,
-            state,
-            predecessor,
-            successor,
-        })
+        Ok((
+            Data {
+                id,
+                state,
+                predecessor,
+                successor,
+            },
+            predecessor - 1,
+            successor - 1,
+        ))
     }
 }
 

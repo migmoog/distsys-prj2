@@ -6,3 +6,6 @@ comp%: prj2
 prj2:
 	docker build . -t $@
 
+.PHONY: teardown%
+teardown%:
+	docker compose -f testcases/docker-compose-testcase-$*.yml down
