@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::{
     fs::File,
-    io::Read,
+    io::{prelude::*, Read},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     thread::sleep,
@@ -14,9 +14,11 @@ mod state;
 use failures::Reasons;
 use state::Data;
 
+const TOKEN_MSG: &'static str = "token";
+
 #[derive(Parser, Debug)]
 #[command(author = "Jeremy Gordon <jeremygordon.dev>")]
-struct Args {
+struct PassToken {
     #[arg(short = 'x')]
     token: bool,
 
@@ -37,12 +39,27 @@ const PORT: &'static str = "6969";
 const MAX_ATTEMPTS: i32 = 10;
 const ATTEMPT_WAIT: Duration = Duration::from_secs(5);
 
+fn pass_print(id: usize, sender: usize, receiver: usize, msg: &str) {
+    println!(
+        "{{id: {}, sender: {}, receiver: {}, message: \"{}\"}}",
+        id, sender, receiver, msg
+    );
+}
+
+fn send_token(sender: &mut TcpStream, data: &Data) -> Result<(), Reasons> {
+    let _ = sender
+        .write_all(TOKEN_MSG.as_bytes())
+        .map_err(Reasons::IO)?;
+    pass_print(data.id, data.id, data.successor, TOKEN_MSG);
+    Ok(())
+}
+
 fn main() -> Result<(), Reasons> {
     let hostname = hostname::get()
         .map_err(Reasons::IO)?
         .into_string()
         .expect("Host device's name as a string");
-    let args = Args::parse();
+    let args = PassToken::parse();
     let peer_list: Vec<String> = match File::open(&args.hostsfile) {
         Ok(mut f) => {
             let mut out = String::new();
@@ -52,10 +69,9 @@ fn main() -> Result<(), Reasons> {
         Err(e) => return Err(Reasons::IO(e)),
     };
 
-    let (data, predecessor, successor) = Data::from_list(&hostname, &peer_list, 0)?;
+    let (mut data, before, after) = Data::from_list(&hostname, &peer_list, 0)?;
     println!("{}", data);
 
-    // set up a listener
     let mut attempts = 0;
     let listener_address = format!("{}:{}", hostname, PORT);
     let listener = loop {
@@ -70,11 +86,10 @@ fn main() -> Result<(), Reasons> {
             }
         }
     };
-    //println!("Listening on {}", listener_address);
     attempts = 0;
 
-    let sendable_address = format!("{}:{}", peer_list[successor], PORT);
-    let sender = loop {
+    let sendable_address = format!("{}:{}", peer_list[after], PORT);
+    let mut sender = loop {
         match TcpStream::connect(&sendable_address) {
             Ok(s) => break s,
             Err(e) => {
@@ -86,13 +101,25 @@ fn main() -> Result<(), Reasons> {
             }
         }
     };
-    //println!("{} connected to {}", hostname, sendable_address);
 
+    // means we're ready to go!
     println!(
         "{} -> [{}]-> {}",
-        peer_list[predecessor], hostname, peer_list[successor]
+        peer_list[before], hostname, peer_list[after]
     );
-    loop {}
 
-    Ok(())
+    if args.token {
+        send_token(&mut sender, &data)?;
+    }
+
+    let mut tok = listener.accept().map_err(Reasons::IO)?.0;
+    loop {
+        let mut buffer = [0u8; 1024];
+        let _ = tok.read(&mut buffer[..]).map_err(Reasons::IO)?;
+        let received = String::from_utf8_lossy(&buffer[..]);
+        pass_print(data.id, data.predecessor, data.id, &received);
+        data.update_token();
+        sleep(Duration::from_secs_f64(args.token_delay.unwrap_or(1.0)));
+        send_token(&mut sender, &data)?;
+    }
 }

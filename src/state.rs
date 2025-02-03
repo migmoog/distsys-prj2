@@ -4,9 +4,9 @@ use crate::failures::Reasons;
 
 #[derive(Debug)]
 pub struct Data {
-    id: usize,
-    state: u32,
-    predecessor: usize,
+    pub id: usize,
+    pub state: u32,
+    pub predecessor: usize,
     pub successor: usize,
 }
 
@@ -39,6 +39,11 @@ impl Data {
             predecessor - 1,
             successor - 1,
         ))
+    }
+
+    pub fn update_token(&mut self) {
+        self.state += 1;
+        println!("{{id: {}, state: {}}}", self.id, self.state);
     }
 }
 
