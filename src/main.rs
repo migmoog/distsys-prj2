@@ -1,58 +1,23 @@
 use clap::Parser;
 use std::{
     fs::File,
-    io::{prelude::*, Read},
+    io::Read,
     net::{TcpListener, TcpStream},
-    path::PathBuf,
     thread::sleep,
     time::Duration,
 };
 
+mod args;
 mod failures;
 mod state;
 
+use args::PassToken;
 use failures::Reasons;
-use state::Data;
-
-const TOKEN_MSG: &'static str = "token";
-
-#[derive(Parser, Debug)]
-#[command(author = "Jeremy Gordon <jeremygordon.dev>")]
-struct PassToken {
-    #[arg(short = 'x')]
-    token: bool,
-
-    #[arg(short = 'h')]
-    hostsfile: PathBuf,
-
-    #[arg(short = 'm')]
-    marker_delay: Option<f64>,
-
-    #[arg(short = 's')]
-    state: Option<u32>,
-
-    #[arg(short = 't')]
-    token_delay: Option<f64>,
-}
+use state::{Data, Message};
 
 const PORT: &'static str = "6969";
 const MAX_ATTEMPTS: i32 = 10;
 const ATTEMPT_WAIT: Duration = Duration::from_secs(5);
-
-fn pass_print(id: usize, sender: usize, receiver: usize, msg: &str) {
-    println!(
-        "{{id: {}, sender: {}, receiver: {}, message: \"{}\"}}",
-        id, sender, receiver, msg
-    );
-}
-
-fn send_token(sender: &mut TcpStream, data: &Data) -> Result<(), Reasons> {
-    let _ = sender
-        .write_all(TOKEN_MSG.as_bytes())
-        .map_err(Reasons::IO)?;
-    pass_print(data.id, data.id, data.successor, TOKEN_MSG);
-    Ok(())
-}
 
 fn main() -> Result<(), Reasons> {
     let hostname = hostname::get()
@@ -69,7 +34,8 @@ fn main() -> Result<(), Reasons> {
         Err(e) => return Err(Reasons::IO(e)),
     };
 
-    let (mut data, before, after) = Data::from_list(&hostname, &peer_list, 0)?;
+    let mut data = Data::from_list(&hostname, &peer_list, 0)?;
+    let (before, after) = (data.predecessor - 1, data.successor - 1);
     println!("{}", data);
 
     let mut attempts = 0;
@@ -104,22 +70,35 @@ fn main() -> Result<(), Reasons> {
 
     // means we're ready to go!
     println!(
-        "{} -> [{}]-> {}",
+        "{} -> [{}] -> {}",
         peer_list[before], hostname, peer_list[after]
     );
 
     if args.token {
-        send_token(&mut sender, &data)?;
+        data.send_message(&mut sender, Message::Token)?;
     }
 
     let mut tok = listener.accept().map_err(Reasons::IO)?.0;
+    let token_delay = Duration::from_secs_f64(args.token_delay.unwrap_or(0.0));
+    let marker_delay = Duration::from_secs_f64(args.marker_delay.unwrap_or(0.0));
+
+    let mut channel_values: Vec<Message> = Vec::new();
     loop {
-        let mut buffer = [0u8; 1024];
-        let _ = tok.read(&mut buffer[..]).map_err(Reasons::IO)?;
-        let received = String::from_utf8_lossy(&buffer[..]);
-        pass_print(data.id, data.predecessor, data.id, &received);
-        data.update_token();
-        sleep(Duration::from_secs_f64(args.token_delay.unwrap_or(1.0)));
-        send_token(&mut sender, &data)?;
+        let mut buffer = [0; 1024];
+        let bytes_read = tok.read(&mut buffer[..]).map_err(Reasons::IO)?;
+        let received =
+            bincode::deserialize(&buffer[..bytes_read]).map_err(|_| Reasons::BadMessage)?;
+        channel_values.push(received);
+
+        data.recv_message(received);
+        match received {
+            Message::Token => {
+                sleep(token_delay);
+            }
+            Message::Marker { snapshot_id } => {
+                sleep(marker_delay);
+            }
+        }
+        data.send_message(&mut sender, received)?;
     }
 }
