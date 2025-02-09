@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y \
 # Set the working directory
 WORKDIR /app
 ADD hostsfile.txt /app
+ADD princeton.txt /app
 
 # Copy the compiled binary from the builder stage
 COPY --from=builder /usr/src/app/target/release/passtoken .

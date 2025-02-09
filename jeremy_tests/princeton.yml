@@ -1,0 +1,18 @@
+# Example from Princeton's 2 process example on their website
+services:
+  p1:
+    networks:
+     - mynetwork
+    hostname: "p1"
+    container_name: "p1"
+    command: -h princeton.txt -m 2 -t 0.2 -s -p 1
+
+  p2:
+    networks:
+     - mynetwork
+    hostname: "p2"
+    container_name: "p2"
+    command: -h princeton.t -m 2 -t 0.2 -x
+
+networks:
+  mynetwork: {}

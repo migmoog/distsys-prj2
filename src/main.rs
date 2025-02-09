@@ -82,13 +82,29 @@ fn main() -> Result<(), Reasons> {
     let token_delay = Duration::from_secs_f64(args.token_delay.unwrap_or(0.0));
     let marker_delay = Duration::from_secs_f64(args.marker_delay.unwrap_or(0.0));
 
-    let mut channel_values: Vec<Message> = Vec::new();
+    let mut can_snapshot = if let Some(1) = args.snapshot_id {
+        true
+    } else {
+        false
+    };
+
     loop {
+        // send marker if ready
+        if let (true, Some(activate_state), Some(snapshot_id)) =
+            (can_snapshot, args.snapshot_delay, args.snapshot_id)
+        {
+            if data.state == activate_state {
+                // snapshot has initiated
+                println!("{{id: {}, snapshot:\"started\"}}", data.id);
+                data.send_message(&mut sender, Message::Marker { snapshot_id })?;
+                can_snapshot = false; // reset flag or this will run forever
+            }
+        }
+
         let mut buffer = [0; 1024];
         let bytes_read = tok.read(&mut buffer[..]).map_err(Reasons::IO)?;
         let received =
             bincode::deserialize(&buffer[..bytes_read]).map_err(|_| Reasons::BadMessage)?;
-        channel_values.push(received);
 
         data.recv_message(received);
         match received {
@@ -96,8 +112,18 @@ fn main() -> Result<(), Reasons> {
                 sleep(token_delay);
             }
             Message::Marker { snapshot_id } => {
+                if let Some(own_id) = args.snapshot_id {
+                    if own_id == snapshot_id - 1 {
+                        can_snapshot = true;
+                    } else if own_id == snapshot_id {
+                        println!("{{id: {}, snapshot:\"completed\"}}", data.id);
+                        continue;
+                    }
+                }
+
                 sleep(marker_delay);
             }
+            Message::ResetSnapshot => {}
         }
         data.send_message(&mut sender, received)?;
     }
