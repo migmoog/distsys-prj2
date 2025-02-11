@@ -1,4 +1,5 @@
 use clap::Parser;
+use socketry::establish_connection;
 use std::{
     fs::File,
     io::Read,
@@ -7,17 +8,18 @@ use std::{
     time::Duration,
 };
 
+// CLI arguments
 mod args;
+// Error types
 mod failures;
+// data for PassToken
 mod state;
+// helpers for establishing connections
+mod socketry;
 
 use args::PassToken;
 use failures::Reasons;
 use state::{Data, Message};
-
-const PORT: &'static str = "6969";
-const MAX_ATTEMPTS: i32 = 10;
-const ATTEMPT_WAIT: Duration = Duration::from_secs(5);
 
 fn main() -> Result<(), Reasons> {
     let hostname = hostname::get()
@@ -38,35 +40,9 @@ fn main() -> Result<(), Reasons> {
     let (before, after) = (data.predecessor - 1, data.successor - 1);
     println!("{}", data);
 
-    let mut attempts = 0;
-    let listener_address = format!("{}:{}", hostname, PORT);
-    let listener = loop {
-        match TcpListener::bind(&listener_address) {
-            Ok(l) => break l,
-            Err(e) => {
-                if attempts == MAX_ATTEMPTS {
-                    return Err(Reasons::IO(e));
-                }
-                attempts += 1;
-                sleep(ATTEMPT_WAIT);
-            }
-        }
-    };
-    attempts = 0;
-
-    let sendable_address = format!("{}:{}", peer_list[after], PORT);
-    let mut sender = loop {
-        match TcpStream::connect(&sendable_address) {
-            Ok(s) => break s,
-            Err(e) => {
-                if attempts == MAX_ATTEMPTS {
-                    return Err(Reasons::IO(e));
-                }
-                attempts += 1;
-                sleep(ATTEMPT_WAIT);
-            }
-        }
-    };
+    let (mut listener, mut sender) = establish_connection(&hostname, &peer_list[after])?;
+    // TODO: Cristina said chandy lamport has connections to EVERY socket (ex: in a 3 process ring,
+    // p1 connects to p2-p4 and viceversa)
 
     // means we're ready to go!
     println!(
@@ -82,22 +58,16 @@ fn main() -> Result<(), Reasons> {
     let token_delay = Duration::from_secs_f64(args.token_delay.unwrap_or(0.0));
     let marker_delay = Duration::from_secs_f64(args.marker_delay.unwrap_or(0.0));
 
-    let mut can_snapshot = if let Some(1) = args.snapshot_id {
-        true
-    } else {
-        false
-    };
-
+    let mut started_snapshots = 0;
     loop {
         // send marker if ready
-        if let (true, Some(activate_state), Some(snapshot_id)) =
-            (can_snapshot, args.snapshot_delay, args.snapshot_id)
-        {
-            if data.state == activate_state {
+        if let (Some(activate_state), Some(snapshot_id)) = (args.snapshot_delay, args.snapshot_id) {
+            if started_snapshots + 1 == snapshot_id && data.state == activate_state {
                 // snapshot has initiated
                 println!("{{id: {}, snapshot:\"started\"}}", data.id);
                 data.send_message(&mut sender, Message::Marker { snapshot_id })?;
-                can_snapshot = false; // reset flag or this will run forever
+                started_snapshots += 1;
+                continue;
             }
         }
 
@@ -108,15 +78,12 @@ fn main() -> Result<(), Reasons> {
 
         data.recv_message(received);
         match received {
-            Message::Token => {
-                sleep(token_delay);
-            }
+            Message::Token => sleep(token_delay),
             Message::Marker { snapshot_id } => {
                 if let Some(own_id) = args.snapshot_id {
-                    if own_id == snapshot_id - 1 {
-                        can_snapshot = true;
-                    } else if own_id == snapshot_id {
+                    if own_id == snapshot_id {
                         println!("{{id: {}, snapshot:\"completed\"}}", data.id);
+                        data.send_message(&mut sender, Message::ResetSnapshot)?;
                         continue;
                     }
                 }
