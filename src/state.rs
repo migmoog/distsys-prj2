@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::{fmt::Display, io::prelude::*};
+use std::{collections::HashMap, fmt::Display, io::prelude::*, net::TcpStream};
 
 use crate::failures::Reasons;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum Message {
     Token,
-    Marker { snapshot_id: u32 },
+    Marker { from: usize, snapshot_id: u32 },
     ResetSnapshot, // done when a snapshot is considered complete
 }
 
@@ -19,11 +19,9 @@ pub struct Data {
     pub successor: usize,
 
     // Chandy Lamport Data
-    seen_marker: bool,
     has_token: bool,
     records: Vec<u32>,            // previous states recorded
     channel_values: Vec<Message>, // values recorded from an incoming channel (only tokens)
-    recording_incoming: bool,
 }
 
 impl Data {
@@ -46,36 +44,23 @@ impl Data {
             state,
             predecessor,
             successor,
-            seen_marker: false,
             has_token: false,
             records: Vec::new(),
             channel_values: Vec::new(),
-            recording_incoming: false,
         })
     }
 
     pub fn recv_message(&mut self, msg: Message) {
         match msg {
             Message::Token => {
-                if self.recording_incoming {
-                    self.channel_values.push(Message::Token);
-                }
                 self.has_token = true;
                 self.state += 1;
                 println!("{{id: {}, state: {}}}", self.id, self.state)
             }
-            Message::Marker { snapshot_id: _ } => {
-                if !self.seen_marker {
-                    self.recording_incoming = false;
-                    self.seen_marker = true;
-
-                    // incoming channel is now considered closed
-                    println!(
-                        "{{id: {}, snapshot:\"channel closed\", channel:{}-{}, queue:{:?}}}",
-                        self.id, self.predecessor, self.id, self.channel_values
-                    );
-                }
-            }
+            Message::Marker {
+                snapshot_id: _,
+                from,
+            } => {}
             Message::ResetSnapshot => {
                 self.snapshot_reset();
                 println!("id: {} is reset", self.id);
@@ -83,7 +68,7 @@ impl Data {
         }
     }
 
-    pub fn send_message(&mut self, sender: &mut impl Write, msg: Message) -> Result<(), Reasons> {
+    fn send_message(&mut self, sender: &mut impl Write, msg: Message) -> Result<(), Reasons> {
         let encoded_buffer = bincode::serialize(&msg).unwrap();
         match msg {
             Message::Token => {
@@ -93,16 +78,15 @@ impl Data {
                 );
                 self.has_token = false;
             }
-            Message::Marker { snapshot_id } => {
+            Message::Marker { snapshot_id, from } => {
                 self.records.push(self.state);
-                self.recording_incoming = true;
 
                 println!(
                     "{{id: {}, sender: {}, receiver: {}, msg: {:?}, state: {}, has_token:{}}}",
                     self.id,
                     self.predecessor,
                     self.successor,
-                    Message::Marker { snapshot_id },
+                    Message::Marker { snapshot_id, from },
                     self.state,
                     self.has_token
                 );
@@ -113,11 +97,26 @@ impl Data {
         Ok(())
     }
 
+    fn send_to_channel(
+        &mut self,
+        outgoing_channels: &mut HashMap<usize, TcpStream>,
+        channel_id: usize,
+        msg: Message,
+    ) -> Result<(), Reasons> {
+        self.send_message(outgoing_channels.get_mut(&channel_id).unwrap(), msg)
+    }
+
+    pub fn pass_token(
+        &mut self,
+        outgoing_channels: &mut HashMap<usize, TcpStream>,
+    ) -> Result<(), Reasons> {
+        self.send_to_channel(outgoing_channels, self.successor, Message::Token)
+    }
+
     // restore default state of snapshot data
     pub fn snapshot_reset(&mut self) {
         self.records.clear();
         self.channel_values.clear();
-        self.seen_marker = false;
     }
 }
 

@@ -1,5 +1,6 @@
+use bincode::deserialize;
 use clap::Parser;
-use socketry::establish_connection;
+use socketry::{bind_listener, connect_channel, make_channels};
 use std::{
     fs::File,
     io::Read,
@@ -37,61 +38,27 @@ fn main() -> Result<(), Reasons> {
     };
 
     let mut data = Data::from_list(&hostname, &peer_list, 0)?;
-    let (before, after) = (data.predecessor - 1, data.successor - 1);
     println!("{}", data);
 
-    let (mut listener, mut sender) = establish_connection(&hostname, &peer_list[after])?;
-    // TODO: Cristina said chandy lamport has connections to EVERY socket (ex: in a 3 process ring,
-    // p1 connects to p2-p4 and viceversa)
+    let mut listener = bind_listener(&hostname)?;
+    let mut outgoing_channels = make_channels(&hostname, &peer_list)?;
 
     // means we're ready to go!
+    // project said "no unneccesary prints"
     println!(
         "{} -> [{}] -> {}",
-        peer_list[before], hostname, peer_list[after]
+        peer_list[data.predecessor - 1],
+        hostname,
+        peer_list[data.successor - 1]
     );
 
     if args.token {
-        data.send_message(&mut sender, Message::Token)?;
+        // send the first token
+        data.pass_token(&mut outgoing_channels)?;
     }
 
-    let mut tok = listener.accept().map_err(Reasons::IO)?.0;
     let token_delay = Duration::from_secs_f64(args.token_delay.unwrap_or(0.0));
     let marker_delay = Duration::from_secs_f64(args.marker_delay.unwrap_or(0.0));
 
-    let mut started_snapshots = 0;
-    loop {
-        // send marker if ready
-        if let (Some(activate_state), Some(snapshot_id)) = (args.snapshot_delay, args.snapshot_id) {
-            if started_snapshots + 1 == snapshot_id && data.state == activate_state {
-                // snapshot has initiated
-                println!("{{id: {}, snapshot:\"started\"}}", data.id);
-                data.send_message(&mut sender, Message::Marker { snapshot_id })?;
-                started_snapshots += 1;
-                continue;
-            }
-        }
-
-        let mut buffer = [0; 1024];
-        let bytes_read = tok.read(&mut buffer[..]).map_err(Reasons::IO)?;
-        let received =
-            bincode::deserialize(&buffer[..bytes_read]).map_err(|_| Reasons::BadMessage)?;
-
-        data.recv_message(received);
-        match received {
-            Message::Token => sleep(token_delay),
-            Message::Marker { snapshot_id } => {
-                if let Some(own_id) = args.snapshot_id {
-                    if own_id == snapshot_id {
-                        println!("{{id: {}, snapshot:\"completed\"}}", data.id);
-                        data.send_message(&mut sender, Message::ResetSnapshot)?;
-                        continue;
-                    }
-                }
-
-                sleep(marker_delay);
-            }
-            Message::ResetSnapshot => {}
-        }
-        data.send_message(&mut sender, received)?;
-    }
+    loop {}
 }
