@@ -1,12 +1,11 @@
 use bincode::deserialize;
 use clap::Parser;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use socketry::{bind_listener, connect_channel, make_channels};
+use socketry::{bind_listener, make_channels};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
     io::Read,
-    net::{TcpListener, TcpStream},
     os::fd::{AsFd, AsRawFd},
     thread::sleep,
     time::Duration,
@@ -51,6 +50,7 @@ fn main() -> Result<(), Reasons> {
         if let Ok((sock, _)) = listener.accept() {
             // need this so nix::poll can do its work
             sock.set_nonblocking(true).map_err(Reasons::IO)?;
+
             incoming_channels.insert(sock.as_raw_fd(), sock);
         }
     }
@@ -62,12 +62,12 @@ fn main() -> Result<(), Reasons> {
 
     // means we're ready to go!
     // project said "no unneccesary prints"
-    println!(
+    /*println!(
         "{} -> [{}] -> {}",
         peer_list[data.predecessor - 1],
         hostname,
         peer_list[data.successor - 1]
-    );
+    );*/
 
     if args.token {
         // send the first token

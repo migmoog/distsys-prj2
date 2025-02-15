@@ -74,7 +74,7 @@ impl Data {
             Message::Marker { snapshot_id, from } => {
                 if !self.closed_channels.contains(&from) {
                     println!("{{proc_id: {}, snapshot_id: {}, snapshot: \"channel closed\", channel:{}-{}, queue:{:?}}}",
-                self.id, snapshot_id, self.predecessor, self.id, self.channel_values);
+                self.id, snapshot_id, from, self.id, self.channel_values);
 
                     self.closed_channels.insert(from);
                 }
@@ -86,12 +86,17 @@ impl Data {
         }
     }
 
-    fn send_message(&mut self, sender: &mut impl Write, msg: Message) -> Result<(), Reasons> {
+    fn send_message(
+        &mut self,
+        sender: &mut impl Write,
+        msg: Message,
+        channel_id: usize,
+    ) -> Result<(), Reasons> {
         match msg {
             Message::Token => {
                 println!(
-                    "{{proc_id {}, state: {}, sender: {}, receiver: {}, message: {:?}}}",
-                    self.id, self.state, self.predecessor, self.successor, msg
+                    "{{proc_id: {}, state: {}, sender: {}, receiver: {}, message: {:?}}}",
+                    self.id, self.state, channel_id, self.successor, msg
                 );
                 self.has_token = false;
             }
@@ -101,11 +106,11 @@ impl Data {
                 }
 
                 println!(
-                    "{{proc_id {}, snapshot_id: {}, sender: {}, receiver: {}, msg: {:?}, state: {}, has_token:{}}}",
+                    "{{proc_id: {}, snapshot_id: {}, sender: {}, receiver: {}, msg: {:?}, state: {}, has_token:{}}}",
                     self.id,
                     snapshot_id,
                     from,
-                    self.successor,
+                    channel_id,
                     Message::Marker { snapshot_id, from },
                     self.state,
                     self.has_token
@@ -124,7 +129,11 @@ impl Data {
         channel_id: usize,
         msg: Message,
     ) -> Result<(), Reasons> {
-        self.send_message(outgoing_channels.get_mut(&channel_id).unwrap(), msg)
+        self.send_message(
+            outgoing_channels.get_mut(&channel_id).unwrap(),
+            msg,
+            channel_id,
+        )
     }
 
     // Passes the token to the successive process
@@ -149,8 +158,8 @@ impl Data {
             Message::AllChannelsClosed { from: self.id }
         };
 
-        for (_, channel) in outgoing_channels.iter_mut() {
-            self.send_message(channel, out_msg)?;
+        for (&cid, channel) in outgoing_channels.iter_mut() {
+            self.send_message(channel, out_msg, cid)?;
         }
         Ok(!channels_still_open)
     }
@@ -163,8 +172,8 @@ impl Data {
     }
 
     pub fn notify_reset(&mut self, outgoing_channels: &mut Channels) -> Result<(), Reasons> {
-        for (_, channel) in outgoing_channels.iter_mut() {
-            self.send_message(channel, Message::ResetSnapshot)?;
+        for (&cid, channel) in outgoing_channels.iter_mut() {
+            self.send_message(channel, Message::ResetSnapshot, cid)?;
         }
         Ok(())
     }
