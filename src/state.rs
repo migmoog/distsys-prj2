@@ -1,3 +1,4 @@
+use bincode::deserialize;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -11,8 +12,14 @@ use crate::failures::Reasons;
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum Message {
     Token,
-    Marker { from: usize, snapshot_id: u32 },
-    AllChannelsClosed { from: usize },
+    Marker {
+        from: usize,
+        snapshot_id: u32,
+        initiator: usize,
+    },
+    AllChannelsClosed {
+        from: usize,
+    },
     ResetSnapshot, // done when a snapshot is considered complete
 }
 
@@ -26,9 +33,10 @@ pub struct Data {
 
     // Chandy Lamport Data
     has_token: bool,
+    seen_marker: bool, // CL has weird rules involving "seeing markers" (check example on canvas)
     closed_channels: HashSet<usize>, // IDs of closed channels (ex: C_{elem}_{self.id})
-    records: Vec<u32>,               // previous states recorded
-    channel_values: Vec<Message>,    // values recorded from an incoming channel (only tokens)
+    records: Vec<u32>, // previous states recorded
+    channel_values: Vec<Message>, // values recorded from an incoming channel (only tokens)
 }
 
 type Channels = HashMap<usize, TcpStream>;
@@ -54,6 +62,7 @@ impl Data {
             predecessor,
             successor,
             has_token: false,
+            seen_marker: false,
             closed_channels: HashSet::new(),
             records: Vec::new(),
             channel_values: Vec::new(),
@@ -63,15 +72,21 @@ impl Data {
     pub fn recv_message(&mut self, msg: Message) {
         match msg {
             Message::Token => {
-                if !self.closed_channels.contains(&self.predecessor) {
+                if self.seen_marker && !self.closed_channels.contains(&self.predecessor) {
                     self.channel_values.push(Message::Token);
                 }
 
                 self.has_token = true;
                 self.state += 1;
-                println!("{{proc_id {}, state: {}}}", self.id, self.state)
+                println!("{{proc_id: {}, state: {}}}", self.id, self.state)
             }
-            Message::Marker { snapshot_id, from } => {
+            Message::Marker {
+                snapshot_id, from, ..
+            } => {
+                if !self.seen_marker {
+                    self.seen_marker = true;
+                }
+
                 if !self.closed_channels.contains(&from) {
                     println!("{{proc_id: {}, snapshot_id: {}, snapshot: \"channel closed\", channel:{}-{}, queue:{:?}}}",
                 self.id, snapshot_id, from, self.id, self.channel_values);
@@ -95,23 +110,31 @@ impl Data {
         match msg {
             Message::Token => {
                 println!(
-                    "{{proc_id: {}, state: {}, sender: {}, receiver: {}, message: {:?}}}",
-                    self.id, self.state, channel_id, self.successor, msg
+                    "{{proc_id: {}, state: {}, sender: {}, receiver: {}, message: \"{:?}\"}}",
+                    self.id, self.state, self.predecessor, self.successor, msg
                 );
                 self.has_token = false;
             }
-            Message::Marker { snapshot_id, from } => {
+            Message::Marker {
+                snapshot_id,
+                from,
+                initiator,
+            } => {
+                if !self.seen_marker {
+                    self.seen_marker = true;
+                }
+
                 if self.closed_channels.len() == 0 {
                     self.records.push(self.state);
                 }
 
                 println!(
-                    "{{proc_id: {}, snapshot_id: {}, sender: {}, receiver: {}, msg: {:?}, state: {}, has_token:{}}}",
+                    "{{proc_id: {}, snapshot_id: {}, sender: {}, receiver: {}, msg: \"{:?}\", state: {}, has_token:{}}}",
                     self.id,
                     snapshot_id,
                     from,
                     channel_id,
-                    Message::Marker { snapshot_id, from },
+                    Message::Marker { snapshot_id, from , initiator},
                     self.state,
                     self.has_token
                 );
@@ -147,20 +170,36 @@ impl Data {
         &mut self,
         outgoing_channels: &mut Channels,
         snapshot_id: u32,
+        initiator: usize,
     ) -> Result<bool, Reasons> {
         let channels_still_open = self.closed_channels.len() < outgoing_channels.len();
-        let out_msg = if channels_still_open {
-            Message::Marker {
-                from: self.id,
-                snapshot_id,
+        if channels_still_open {
+            for (&cid, channel) in outgoing_channels.iter_mut() {
+                self.send_message(
+                    channel,
+                    Message::Marker {
+                        from: self.id,
+                        snapshot_id,
+                        initiator,
+                    },
+                    cid,
+                )?;
             }
         } else {
-            Message::AllChannelsClosed { from: self.id }
-        };
+            println!(
+                "proc_id: {}, all channels closed: {:?}",
+                self.id, self.closed_channels
+            );
 
-        for (&cid, channel) in outgoing_channels.iter_mut() {
-            self.send_message(channel, out_msg, cid)?;
+            if initiator != self.id {
+                self.send_to_channel(
+                    outgoing_channels,
+                    initiator,
+                    Message::AllChannelsClosed { from: self.id },
+                )?;
+            }
         }
+
         Ok(!channels_still_open)
     }
 
