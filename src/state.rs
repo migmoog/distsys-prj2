@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt::Display, io::prelude::*, net::TcpStream};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    io::prelude::*,
+    net::TcpStream,
+};
 
 use crate::failures::Reasons;
 
@@ -7,6 +12,7 @@ use crate::failures::Reasons;
 pub enum Message {
     Token,
     Marker { from: usize, snapshot_id: u32 },
+    AllChannelsClosed { from: usize },
     ResetSnapshot, // done when a snapshot is considered complete
 }
 
@@ -20,9 +26,12 @@ pub struct Data {
 
     // Chandy Lamport Data
     has_token: bool,
-    records: Vec<u32>,            // previous states recorded
-    channel_values: Vec<Message>, // values recorded from an incoming channel (only tokens)
+    closed_channels: HashSet<usize>, // IDs of closed channels (ex: C_{elem}_{self.id})
+    records: Vec<u32>,               // previous states recorded
+    channel_values: Vec<Message>,    // values recorded from an incoming channel (only tokens)
 }
+
+type Channels = HashMap<usize, TcpStream>;
 
 impl Data {
     pub fn from_list(hostname: &str, peer_list: &Vec<String>, state: u32) -> Result<Self, Reasons> {
@@ -45,6 +54,7 @@ impl Data {
             predecessor,
             successor,
             has_token: false,
+            closed_channels: HashSet::new(),
             records: Vec::new(),
             channel_values: Vec::new(),
         })
@@ -53,70 +63,110 @@ impl Data {
     pub fn recv_message(&mut self, msg: Message) {
         match msg {
             Message::Token => {
+                if !self.closed_channels.contains(&self.predecessor) {
+                    self.channel_values.push(Message::Token);
+                }
+
                 self.has_token = true;
                 self.state += 1;
-                println!("{{id: {}, state: {}}}", self.id, self.state)
+                println!("{{proc_id {}, state: {}}}", self.id, self.state)
             }
-            Message::Marker {
-                snapshot_id: _,
-                from,
-            } => {}
+            Message::Marker { snapshot_id, from } => {
+                if !self.closed_channels.contains(&from) {
+                    println!("{{proc_id: {}, snapshot_id: {}, snapshot: \"channel closed\", channel:{}-{}, queue:{:?}}}",
+                self.id, snapshot_id, self.predecessor, self.id, self.channel_values);
+
+                    self.closed_channels.insert(from);
+                }
+            }
             Message::ResetSnapshot => {
-                self.snapshot_reset();
-                println!("id: {} is reset", self.id);
+                self.reset_snapshot();
             }
+            _ => {}
         }
     }
 
     fn send_message(&mut self, sender: &mut impl Write, msg: Message) -> Result<(), Reasons> {
-        let encoded_buffer = bincode::serialize(&msg).unwrap();
         match msg {
             Message::Token => {
                 println!(
-                    "{{id: {}, state: {}, sender: {}, receiver: {}, message: {:?}}}",
+                    "{{proc_id {}, state: {}, sender: {}, receiver: {}, message: {:?}}}",
                     self.id, self.state, self.predecessor, self.successor, msg
                 );
                 self.has_token = false;
             }
             Message::Marker { snapshot_id, from } => {
-                self.records.push(self.state);
+                if self.closed_channels.len() == 0 {
+                    self.records.push(self.state);
+                }
 
                 println!(
-                    "{{id: {}, sender: {}, receiver: {}, msg: {:?}, state: {}, has_token:{}}}",
+                    "{{proc_id {}, snapshot_id: {}, sender: {}, receiver: {}, msg: {:?}, state: {}, has_token:{}}}",
                     self.id,
-                    self.predecessor,
+                    snapshot_id,
+                    from,
                     self.successor,
                     Message::Marker { snapshot_id, from },
                     self.state,
                     self.has_token
                 );
             }
-            Message::ResetSnapshot => println!("Telling {} to reset", self.successor),
+            _ => {}
         }
-        sender.write_all(&encoded_buffer[..]).map_err(Reasons::IO)?;
+        let encoded_buffer = bincode::serialize(&msg).map_err(|_| Reasons::BadMessage)?;
+        sender.write_all(&encoded_buffer).map_err(Reasons::IO)?;
         Ok(())
     }
 
     fn send_to_channel(
         &mut self,
-        outgoing_channels: &mut HashMap<usize, TcpStream>,
+        outgoing_channels: &mut Channels,
         channel_id: usize,
         msg: Message,
     ) -> Result<(), Reasons> {
         self.send_message(outgoing_channels.get_mut(&channel_id).unwrap(), msg)
     }
 
-    pub fn pass_token(
-        &mut self,
-        outgoing_channels: &mut HashMap<usize, TcpStream>,
-    ) -> Result<(), Reasons> {
+    // Passes the token to the successive process
+    pub fn pass_token(&mut self, outgoing_channels: &mut Channels) -> Result<(), Reasons> {
         self.send_to_channel(outgoing_channels, self.successor, Message::Token)
     }
 
+    // sends a marker to all outgoing channels
+    // returns true if all the process' channels have been closed
+    pub fn propagate_snapshot(
+        &mut self,
+        outgoing_channels: &mut Channels,
+        snapshot_id: u32,
+    ) -> Result<bool, Reasons> {
+        let channels_still_open = self.closed_channels.len() < outgoing_channels.len();
+        let out_msg = if channels_still_open {
+            Message::Marker {
+                from: self.id,
+                snapshot_id,
+            }
+        } else {
+            Message::AllChannelsClosed { from: self.id }
+        };
+
+        for (_, channel) in outgoing_channels.iter_mut() {
+            self.send_message(channel, out_msg)?;
+        }
+        Ok(!channels_still_open)
+    }
+
     // restore default state of snapshot data
-    pub fn snapshot_reset(&mut self) {
+    pub fn reset_snapshot(&mut self) {
         self.records.clear();
         self.channel_values.clear();
+        self.closed_channels.clear();
+    }
+
+    pub fn notify_reset(&mut self, outgoing_channels: &mut Channels) -> Result<(), Reasons> {
+        for (_, channel) in outgoing_channels.iter_mut() {
+            self.send_message(channel, Message::ResetSnapshot)?;
+        }
+        Ok(())
     }
 }
 
@@ -124,7 +174,7 @@ impl Display for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{{id:{}, state:{}, predecessor:{}, successor:{}}}",
+            "{{proc_id: {}, state:{}, predecessor:{}, successor:{}}}",
             self.id, self.state, self.predecessor, self.successor
         )
     }

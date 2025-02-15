@@ -3,7 +3,7 @@ use clap::Parser;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use socketry::{bind_listener, connect_channel, make_channels};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::Read,
     net::{TcpListener, TcpStream},
@@ -43,12 +43,12 @@ fn main() -> Result<(), Reasons> {
     let mut data = Data::from_list(&hostname, &peer_list, 0)?;
     println!("{}", data);
 
-    let mut listener = bind_listener(&hostname)?;
+    let listener = bind_listener(&hostname)?;
     let mut outgoing_channels = make_channels(&hostname, &peer_list)?;
     let mut incoming_channels = HashMap::new();
     let expected_connections = peer_list.len() - 1;
     while incoming_channels.len() < expected_connections {
-        if let Ok((mut sock, _)) = listener.accept() {
+        if let Ok((sock, _)) = listener.accept() {
             // need this so nix::poll can do its work
             sock.set_nonblocking(true).map_err(Reasons::IO)?;
             incoming_channels.insert(sock.as_raw_fd(), sock);
@@ -77,9 +77,33 @@ fn main() -> Result<(), Reasons> {
     let token_delay = Duration::from_secs_f64(args.token_delay.unwrap_or(0.0));
     let marker_delay = Duration::from_secs_f64(args.marker_delay.unwrap_or(0.0));
 
+    let mut last_snapshot_id = 0;
+    let mut concluded_processes = HashSet::new();
+    let mut i_am_initiator = false;
     loop {
-        let events = poll(&mut poll_fds, PollTimeout::NONE).map_err(|e| Reasons::IO(e.into()))?;
+        // check if we can initiate a snapshot
+        if let (Some(snapshot_id), Some(activate_state)) = (args.snapshot_id, args.snapshot_delay) {
+            if last_snapshot_id == snapshot_id - 1 && data.state == activate_state {
+                println!(
+                    "{{proc_id: {}, snapshot_id: {}, snapshot: \"started\"}}",
+                    data.id, snapshot_id
+                );
+                last_snapshot_id = snapshot_id;
+                i_am_initiator = true;
+                let all_closed = data.propagate_snapshot(&mut outgoing_channels, snapshot_id)?;
+                assert!(!all_closed);
+                continue;
+            }
+        }
 
+        if concluded_processes.len() == poll_fds.len() {
+            println!("{{proc_id: {}, snapshot:\"complete\"}}", data.id);
+            concluded_processes.clear();
+            i_am_initiator = false;
+            data.notify_reset(&mut outgoing_channels)?;
+        }
+
+        let events = poll(&mut poll_fds, PollTimeout::NONE).map_err(|e| Reasons::IO(e.into()))?;
         if events == 0 {
             continue;
         }
@@ -103,7 +127,26 @@ fn main() -> Result<(), Reasons> {
                     sleep(token_delay);
                     data.pass_token(&mut outgoing_channels)?;
                 }
-                _ => {}
+                Message::Marker {
+                    from: _,
+                    snapshot_id,
+                } => {
+                    last_snapshot_id = last_snapshot_id.max(snapshot_id);
+                    sleep(marker_delay);
+                    let all_closed =
+                        data.propagate_snapshot(&mut outgoing_channels, snapshot_id)?;
+                    if all_closed {
+                        concluded_processes.insert(data.id);
+                    }
+                }
+                Message::AllChannelsClosed { from } => {
+                    if i_am_initiator {
+                        concluded_processes.insert(from);
+                    }
+                }
+                Message::ResetSnapshot => {
+                    concluded_processes.clear();
+                }
             }
         }
     }
