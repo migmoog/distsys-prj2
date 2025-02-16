@@ -3,7 +3,7 @@ use clap::Parser;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use socketry::{bind_listener, make_channels};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::File,
     io::Read,
     os::fd::{AsFd, AsRawFd},
@@ -29,7 +29,7 @@ fn main() -> Result<(), Reasons> {
         .map_err(Reasons::IO)?
         .into_string()
         .expect("Host device's name as a string");
-    let mut args = PassToken::parse();
+    let args = PassToken::parse();
     let peer_list: Vec<String> = match File::open(&args.hostsfile) {
         Ok(mut f) => {
             let mut out = String::new();
@@ -66,31 +66,18 @@ fn main() -> Result<(), Reasons> {
     let token_delay = Duration::from_secs_f64(args.token_delay.unwrap_or(0.0));
     let marker_delay = Duration::from_secs_f64(args.marker_delay.unwrap_or(0.0));
 
-    let mut i_am_initiator = false;
-    let mut snapshot_complete = false;
-    let mut finished_processes = HashSet::new();
     loop {
         if let (Some(snapshot_id), Some(activate_state)) = (args.snapshot_id, args.snapshot_delay) {
-            if !i_am_initiator && snapshot_id == 1 && data.state == activate_state {
-                println!(
-                    "{{proc_id: {}, snapshot_id: {}, snapshot: \"started\"}}",
-                    data.id, snapshot_id
-                );
-                data.propagate_snapshot(&mut outgoing_channels, snapshot_id, data.id)?;
-                i_am_initiator = true;
+            if !data.seen_marker && snapshot_id == 1 && data.state == activate_state {
+                data.initiate_snapshot(&mut outgoing_channels, snapshot_id)?;
             }
         }
 
-        if finished_processes.len() == peer_list.len() {
-            println!(
-                "{{proc_id: {}, snapshot_id: {}, snapshot: \"completed\"}}",
-                data.id, 1
-            );
-            i_am_initiator = false;
-            snapshot_complete = true;
-        }
+        let events = poll(&mut poll_fds, PollTimeout::NONE).map_err(|e| Reasons::IO(e.into()))?;
 
-        let _events = poll(&mut poll_fds, PollTimeout::NONE).map_err(|e| Reasons::IO(e.into()))?;
+        if events == 0 {
+            continue;
+        }
         let mut message_queue = Vec::new();
         for pfd in poll_fds.iter().filter(|pfd| {
             pfd.revents()
@@ -108,34 +95,23 @@ fn main() -> Result<(), Reasons> {
             message_queue.push(msg);
         }
 
+        message_queue.sort_by_key(|msg| match msg {
+            Message::Marker { .. } => 0,
+            Message::Token => 1,
+        });
+        //println!("msgs: {:?}", message_queue);
+
         for msg in message_queue {
-            data.recv_message(msg);
+            data.recv_message(msg, incoming_channels.len());
             match msg {
                 Message::Token => {
                     sleep(token_delay);
                     data.pass_token(&mut outgoing_channels)?;
                 }
-                Message::Marker {
-                    snapshot_id,
-                    initiator,
-                    ..
-                } => {
-                    if snapshot_complete || finished_processes.contains(&data.id) {
-                        continue;
-                    }
+                Message::Marker { snapshot_id, .. } => {
                     sleep(marker_delay);
-                    let all_closed =
-                        data.propagate_snapshot(&mut outgoing_channels, snapshot_id, initiator)?;
-                    if all_closed && i_am_initiator {
-                        finished_processes.insert(data.id);
-                    }
+                    data.propagate_snapshot(&mut outgoing_channels, snapshot_id)?;
                 }
-                Message::AllChannelsClosed { from } => {
-                    // CHANDY LAMPORT RULE
-                    assert!(i_am_initiator);
-                    finished_processes.insert(from);
-                }
-                Message::ResetSnapshot => {}
             }
         }
     }

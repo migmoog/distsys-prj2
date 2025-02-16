@@ -1,4 +1,3 @@
-use bincode::deserialize;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -12,15 +11,7 @@ use crate::failures::Reasons;
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum Message {
     Token,
-    Marker {
-        from: usize,
-        snapshot_id: u32,
-        initiator: usize,
-    },
-    AllChannelsClosed {
-        from: usize,
-    },
-    ResetSnapshot, // done when a snapshot is considered complete
+    Marker { from: usize, snapshot_id: u32 },
 }
 
 #[derive(Debug)]
@@ -33,9 +24,9 @@ pub struct Data {
 
     // Chandy Lamport Data
     has_token: bool,
-    seen_marker: bool, // CL has weird rules involving "seeing markers" (check example on canvas)
+    pub seen_marker: bool, // CL has weird rules involving "seeing markers" (check example on canvas)
     closed_channels: HashSet<usize>, // IDs of closed channels (ex: C_{elem}_{self.id})
-    records: Vec<u32>, // previous states recorded
+    records: Vec<u32>,     // previous states recorded
     channel_values: Vec<Message>, // values recorded from an incoming channel (only tokens)
 }
 
@@ -61,6 +52,7 @@ impl Data {
             state,
             predecessor,
             successor,
+
             has_token: false,
             seen_marker: false,
             closed_channels: HashSet::new(),
@@ -69,7 +61,66 @@ impl Data {
         })
     }
 
-    pub fn recv_message(&mut self, msg: Message) {
+    pub fn initiate_snapshot(
+        &mut self,
+        outgoing_channels: &mut Channels,
+        snapshot_id: u32,
+    ) -> Result<(), Reasons> {
+        assert!(!self.seen_marker);
+        self.seen_marker = true;
+        self.records.push(self.state);
+
+        for (&channel_id, channel) in outgoing_channels.iter_mut() {
+            self.send_message(
+                channel,
+                Message::Marker {
+                    from: self.id,
+                    snapshot_id,
+                },
+                channel_id,
+            )?;
+        }
+        println!(
+            "{{proc_id: {}, snapshot_id: {}, snapshot: \"started\"}}",
+            self.id, snapshot_id
+        );
+        Ok(())
+    }
+
+    pub fn propagate_snapshot(
+        &mut self,
+        outgoing_channels: &mut Channels,
+        snapshot_id: u32,
+    ) -> Result<(), Reasons> {
+        if self.seen_marker {
+            return Ok(());
+        }
+
+        self.seen_marker = true;
+        println!(
+            "{{proc_id: {}, snapshot_id: {}, snapshot: \"started\"}}",
+            self.id, snapshot_id
+        );
+        for (&channel_id, channel) in outgoing_channels.iter_mut() {
+            self.send_message(
+                channel,
+                Message::Marker {
+                    from: self.id,
+                    snapshot_id,
+                },
+                channel_id,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn reset_snapshot(&mut self) {
+        self.seen_marker = false;
+        self.channel_values.clear();
+        self.closed_channels.clear();
+    }
+
+    pub fn recv_message(&mut self, msg: Message, channel_count: usize) {
         match msg {
             Message::Token => {
                 if self.seen_marker && !self.closed_channels.contains(&self.predecessor) {
@@ -80,24 +131,21 @@ impl Data {
                 self.state += 1;
                 println!("{{proc_id: {}, state: {}}}", self.id, self.state)
             }
-            Message::Marker {
-                snapshot_id, from, ..
-            } => {
-                if !self.seen_marker {
-                    self.seen_marker = true;
-                }
 
-                if !self.closed_channels.contains(&from) {
-                    println!("{{proc_id: {}, snapshot_id: {}, snapshot: \"channel closed\", channel:{}-{}, queue:{:?}}}",
-                self.id, snapshot_id, from, self.id, self.channel_values);
+            Message::Marker { from, snapshot_id } => {
+                self.closed_channels.insert(from);
+                println!(
+                    "{{proc_id: {}, snapshot_id: {}, snapshot: \"channel closed\", channel: {}-{}, queue: {:?}}}",
+                    self.id, snapshot_id, from, self.id, self.channel_values
+                );
 
-                    self.closed_channels.insert(from);
+                if self.closed_channels.len() == channel_count {
+                    println!(
+                        "{{proc_id: {}, snapshot_id: {}, snapshot: \"complete\"}}",
+                        self.id, snapshot_id
+                    );
                 }
             }
-            Message::ResetSnapshot => {
-                self.reset_snapshot();
-            }
-            _ => {}
         }
     }
 
@@ -111,33 +159,9 @@ impl Data {
             Message::Token => {
                 println!(
                     "{{proc_id: {}, state: {}, sender: {}, receiver: {}, message: \"{:?}\"}}",
-                    self.id, self.state, self.predecessor, self.successor, msg
+                    self.id, self.state, self.predecessor, channel_id, msg
                 );
                 self.has_token = false;
-            }
-            Message::Marker {
-                snapshot_id,
-                from,
-                initiator,
-            } => {
-                if !self.seen_marker {
-                    self.seen_marker = true;
-                }
-
-                if self.closed_channels.len() == 0 {
-                    self.records.push(self.state);
-                }
-
-                println!(
-                    "{{proc_id: {}, snapshot_id: {}, sender: {}, receiver: {}, msg: \"{:?}\", state: {}, has_token:{}}}",
-                    self.id,
-                    snapshot_id,
-                    from,
-                    channel_id,
-                    Message::Marker { snapshot_id, from , initiator},
-                    self.state,
-                    self.has_token
-                );
             }
             _ => {}
         }
@@ -162,59 +186,6 @@ impl Data {
     // Passes the token to the successive process
     pub fn pass_token(&mut self, outgoing_channels: &mut Channels) -> Result<(), Reasons> {
         self.send_to_channel(outgoing_channels, self.successor, Message::Token)
-    }
-
-    // sends a marker to all outgoing channels
-    // returns true if all the process' channels have been closed
-    pub fn propagate_snapshot(
-        &mut self,
-        outgoing_channels: &mut Channels,
-        snapshot_id: u32,
-        initiator: usize,
-    ) -> Result<bool, Reasons> {
-        let channels_still_open = self.closed_channels.len() < outgoing_channels.len();
-        if channels_still_open {
-            for (&cid, channel) in outgoing_channels.iter_mut() {
-                self.send_message(
-                    channel,
-                    Message::Marker {
-                        from: self.id,
-                        snapshot_id,
-                        initiator,
-                    },
-                    cid,
-                )?;
-            }
-        } else {
-            println!(
-                "proc_id: {}, all channels closed: {:?}",
-                self.id, self.closed_channels
-            );
-
-            if initiator != self.id {
-                self.send_to_channel(
-                    outgoing_channels,
-                    initiator,
-                    Message::AllChannelsClosed { from: self.id },
-                )?;
-            }
-        }
-
-        Ok(!channels_still_open)
-    }
-
-    // restore default state of snapshot data
-    pub fn reset_snapshot(&mut self) {
-        self.records.clear();
-        self.channel_values.clear();
-        self.closed_channels.clear();
-    }
-
-    pub fn notify_reset(&mut self, outgoing_channels: &mut Channels) -> Result<(), Reasons> {
-        for (&cid, channel) in outgoing_channels.iter_mut() {
-            self.send_message(channel, Message::ResetSnapshot, cid)?;
-        }
-        Ok(())
     }
 }
 
