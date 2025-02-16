@@ -23,6 +23,7 @@ pub struct Data {
     pub successor: usize,
 
     // Chandy Lamport Data
+    pub desired_snapshot: u32, // the id of ongoing snapshot
     has_token: bool,
     pub seen_marker: bool, // CL has weird rules involving "seeing markers" (check example on canvas)
     closed_channels: HashSet<usize>, // IDs of closed channels (ex: C_{elem}_{self.id})
@@ -53,6 +54,7 @@ impl Data {
             predecessor,
             successor,
 
+            desired_snapshot: 1,
             has_token: false,
             seen_marker: false,
             closed_channels: HashSet::new(),
@@ -92,7 +94,7 @@ impl Data {
         outgoing_channels: &mut Channels,
         snapshot_id: u32,
     ) -> Result<(), Reasons> {
-        if self.seen_marker {
+        if self.seen_marker || snapshot_id != self.desired_snapshot {
             return Ok(());
         }
 
@@ -118,6 +120,8 @@ impl Data {
         self.seen_marker = false;
         self.channel_values.clear();
         self.closed_channels.clear();
+        self.records.clear();
+        self.desired_snapshot += 1;
     }
 
     pub fn recv_message(&mut self, msg: Message, channel_count: usize) {
@@ -144,6 +148,8 @@ impl Data {
                         "{{proc_id: {}, snapshot_id: {}, snapshot: \"complete\"}}",
                         self.id, snapshot_id
                     );
+
+                    self.reset_snapshot();
                 }
             }
         }

@@ -68,13 +68,15 @@ fn main() -> Result<(), Reasons> {
 
     loop {
         if let (Some(snapshot_id), Some(activate_state)) = (args.snapshot_id, args.snapshot_delay) {
-            if !data.seen_marker && snapshot_id == 1 && data.state == activate_state {
+            if !data.seen_marker
+                && data.desired_snapshot == snapshot_id
+                && data.state == activate_state
+            {
                 data.initiate_snapshot(&mut outgoing_channels, snapshot_id)?;
             }
         }
 
         let events = poll(&mut poll_fds, PollTimeout::NONE).map_err(|e| Reasons::IO(e.into()))?;
-
         if events == 0 {
             continue;
         }
@@ -99,7 +101,6 @@ fn main() -> Result<(), Reasons> {
             Message::Marker { .. } => 0,
             Message::Token => 1,
         });
-        //println!("msgs: {:?}", message_queue);
 
         for msg in message_queue {
             data.recv_message(msg, incoming_channels.len());
