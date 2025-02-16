@@ -1,0 +1,25 @@
+How Jeremy's Epic Chandy-Lamport implementation works.
+
+1. Reads the hostfile for peers to connect to
+
+2. Initializes data structure and establishes connections to every other peer in the system (check `state_diagram.png` for what it looks like)
+
+3. Ready all incoming channels for polling
+
+4. Send the first token if this process got the -x flag
+
+5. begin looping and passing token. Check if we're ready to snapshot at the start of each loop
+
+6. collect messages from incoming channels and sort them into a message queue with markers first and tokens last
+
+7. if we got a 
+  Message::Token:
+   - increase state
+   - sleep for token delay
+   - pass it on
+  Message::Marker:
+   - sleep for maker delay
+   - send a marker to all outgoing channels (if process hasn't seen one yet for this snapshot)
+   - complete snapshot if all channels are closed
+
+8. Repeat step 5

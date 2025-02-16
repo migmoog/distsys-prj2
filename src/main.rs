@@ -25,6 +25,7 @@ use failures::Reasons;
 use state::{Data, Message};
 
 fn main() -> Result<(), Reasons> {
+    // extracting peer names from hostfile
     let hostname = hostname::get()
         .map_err(Reasons::IO)?
         .into_string()
@@ -39,6 +40,7 @@ fn main() -> Result<(), Reasons> {
         Err(e) => return Err(Reasons::IO(e)),
     };
 
+    // initializing process data and connecting to peers
     let mut data = Data::from_list(&hostname, &peer_list, 0)?;
 
     let listener = bind_listener(&hostname)?;
@@ -52,14 +54,15 @@ fn main() -> Result<(), Reasons> {
             incoming_channels.insert(sock.as_raw_fd(), sock);
         }
     }
+    // creating an array for poll() calls
     let mut poll_fds: Vec<PollFd> = incoming_channels
         .iter()
         .map(|(_, s)| PollFd::new(s.as_fd(), PollFlags::POLLIN))
         .collect();
 
-    println!("{}", data);
+    eprintln!("{}", data);
+    // send the first token if we have the flag "-x"
     if args.token {
-        // send the first token
         data.pass_token(&mut outgoing_channels)?;
     }
 
@@ -67,6 +70,7 @@ fn main() -> Result<(), Reasons> {
     let marker_delay = Duration::from_secs_f64(args.marker_delay.unwrap_or(0.0));
 
     loop {
+        // check if we're ready to begin the snapshot
         if let (Some(snapshot_id), Some(activate_state)) = (args.snapshot_id, args.snapshot_delay) {
             if !data.seen_marker
                 && data.desired_snapshot == snapshot_id
@@ -76,6 +80,7 @@ fn main() -> Result<(), Reasons> {
             }
         }
 
+        // poll() connections for any events like markers or tokens
         let events = poll(&mut poll_fds, PollTimeout::NONE).map_err(|e| Reasons::IO(e.into()))?;
         if events == 0 {
             continue;
@@ -97,6 +102,7 @@ fn main() -> Result<(), Reasons> {
             message_queue.push(msg);
         }
 
+        // sort so that Markers are FIFO
         message_queue.sort_by_key(|msg| match msg {
             Message::Marker { .. } => 0,
             Message::Token => 1,
@@ -105,10 +111,12 @@ fn main() -> Result<(), Reasons> {
         for msg in message_queue {
             data.recv_message(msg, incoming_channels.len());
             match msg {
+                // pass the token if we encounter one
                 Message::Token => {
                     sleep(token_delay);
                     data.pass_token(&mut outgoing_channels)?;
                 }
+                // propagate the snapshot if we must
                 Message::Marker { snapshot_id, .. } => {
                     sleep(marker_delay);
                     data.propagate_snapshot(&mut outgoing_channels, snapshot_id)?;

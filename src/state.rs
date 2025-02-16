@@ -82,7 +82,7 @@ impl Data {
                 channel_id,
             )?;
         }
-        println!(
+        eprintln!(
             "{{proc_id: {}, snapshot_id: {}, snapshot: \"started\"}}",
             self.id, snapshot_id
         );
@@ -99,7 +99,7 @@ impl Data {
         }
 
         self.seen_marker = true;
-        println!(
+        eprintln!(
             "{{proc_id: {}, snapshot_id: {}, snapshot: \"started\"}}",
             self.id, snapshot_id
         );
@@ -133,18 +133,18 @@ impl Data {
 
                 self.has_token = true;
                 self.state += 1;
-                println!("{{proc_id: {}, state: {}}}", self.id, self.state)
+                eprintln!("{{proc_id: {}, state: {}}}", self.id, self.state)
             }
 
             Message::Marker { from, snapshot_id } => {
                 self.closed_channels.insert(from);
-                println!(
+                eprintln!(
                     "{{proc_id: {}, snapshot_id: {}, snapshot: \"channel closed\", channel: {}-{}, queue: {:?}}}",
                     self.id, snapshot_id, from, self.id, self.channel_values
                 );
 
                 if self.closed_channels.len() == channel_count {
-                    println!(
+                    eprintln!(
                         "{{proc_id: {}, snapshot_id: {}, snapshot: \"complete\"}}",
                         self.id, snapshot_id
                     );
@@ -163,7 +163,7 @@ impl Data {
     ) -> Result<(), Reasons> {
         match msg {
             Message::Token => {
-                println!(
+                eprintln!(
                     "{{proc_id: {}, state: {}, sender: {}, receiver: {}, message: \"{:?}\"}}",
                     self.id, self.state, self.predecessor, channel_id, msg
                 );

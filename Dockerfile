@@ -1,4 +1,3 @@
-# ---- Build Stage ----
 FROM rust:1.83 AS builder
 
 # Set the working directory inside the container
