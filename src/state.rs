@@ -15,20 +15,33 @@ pub enum Message {
 }
 
 #[derive(Debug)]
+pub struct ChandyLamport {
+    pub seen_marker: bool, // CL has weird rules involving "seeing markers" (check example on canvas)
+    closed_channels: HashSet<usize>, // IDs of closed channels (ex: C_{elem}_{self.id})
+    records: Vec<u32>,     // previous states recorded
+    channel_values: Vec<Message>, // values recorded from an incoming channel (only tokens)
+}
+impl Default for ChandyLamport {
+    fn default() -> Self {
+        Self {
+            seen_marker: false,
+            closed_channels: HashSet::new(),
+            records: Vec::new(),
+            channel_values: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Data {
     // PassToken Data
     pub id: usize,
     pub state: u32,
     pub predecessor: usize,
     pub successor: usize,
-
-    // Chandy Lamport Data
-    pub desired_snapshot: u32, // the id of ongoing snapshot
     has_token: bool,
-    pub seen_marker: bool, // CL has weird rules involving "seeing markers" (check example on canvas)
-    closed_channels: HashSet<usize>, // IDs of closed channels (ex: C_{elem}_{self.id})
-    records: Vec<u32>,     // previous states recorded
-    channel_values: Vec<Message>, // values recorded from an incoming channel (only tokens)
+
+    pub snapshots: HashMap<u32, ChandyLamport>,
 }
 
 type Channels = HashMap<usize, TcpStream>;
@@ -52,14 +65,9 @@ impl Data {
             id,
             state,
             predecessor,
-            successor,
-
-            desired_snapshot: 1,
             has_token: false,
-            seen_marker: false,
-            closed_channels: HashSet::new(),
-            records: Vec::new(),
-            channel_values: Vec::new(),
+            successor,
+            snapshots: HashMap::new(),
         })
     }
 
@@ -68,9 +76,8 @@ impl Data {
         outgoing_channels: &mut Channels,
         snapshot_id: u32,
     ) -> Result<(), Reasons> {
-        assert!(!self.seen_marker);
-        self.seen_marker = true;
-        self.records.push(self.state);
+        assert!(self.snapshots.get(&snapshot_id).is_none());
+        self.snapshots.insert(snapshot_id, ChandyLamport::default());
 
         for (&channel_id, channel) in outgoing_channels.iter_mut() {
             self.send_message(
@@ -94,11 +101,11 @@ impl Data {
         outgoing_channels: &mut Channels,
         snapshot_id: u32,
     ) -> Result<(), Reasons> {
-        if self.seen_marker || snapshot_id != self.desired_snapshot {
+        let snapshot = self.snapshots.get_mut(&snapshot_id).unwrap();
+        if snapshot.seen_marker {
             return Ok(());
         }
-
-        self.seen_marker = true;
+        snapshot.seen_marker = true;
         eprintln!(
             "{{proc_id: {}, snapshot_id: {}, snapshot: \"started\"}}",
             self.id, snapshot_id
@@ -116,19 +123,14 @@ impl Data {
         Ok(())
     }
 
-    fn reset_snapshot(&mut self) {
-        self.seen_marker = false;
-        self.channel_values.clear();
-        self.closed_channels.clear();
-        self.records.clear();
-        self.desired_snapshot += 1;
-    }
-
     pub fn recv_message(&mut self, msg: Message, channel_count: usize) {
         match msg {
             Message::Token => {
-                if self.seen_marker && !self.closed_channels.contains(&self.predecessor) {
-                    self.channel_values.push(Message::Token);
+                for (_snapshot_id, snapshot) in self.snapshots.iter_mut() {
+                    if snapshot.seen_marker && !snapshot.closed_channels.contains(&self.predecessor)
+                    {
+                        snapshot.channel_values.push(Message::Token);
+                    }
                 }
 
                 self.has_token = true;
@@ -137,19 +139,21 @@ impl Data {
             }
 
             Message::Marker { from, snapshot_id } => {
-                self.closed_channels.insert(from);
+                let snapshot = self
+                    .snapshots
+                    .entry(snapshot_id)
+                    .or_insert_with(ChandyLamport::default);
+                snapshot.closed_channels.insert(from);
                 eprintln!(
                     "{{proc_id: {}, snapshot_id: {}, snapshot: \"channel closed\", channel: {}-{}, queue: {:?}}}",
-                    self.id, snapshot_id, from, self.id, self.channel_values
+                    self.id, snapshot_id, from, self.id, snapshot.channel_values
                 );
 
-                if self.closed_channels.len() == channel_count {
+                if snapshot.closed_channels.len() == channel_count {
                     eprintln!(
                         "{{proc_id: {}, snapshot_id: {}, snapshot: \"complete\"}}",
                         self.id, snapshot_id
                     );
-
-                    self.reset_snapshot();
                 }
             }
         }
@@ -169,29 +173,29 @@ impl Data {
                 );
                 self.has_token = false;
             }
-            _ => {}
+            Message::Marker { snapshot_id, from } => {
+                eprintln!("{{proc_id: {}, snapshot_id: {}, sender: {}, receiver: {}, msg: {:?}, state: {}, has_token: {}}}",
+                self.id,
+                snapshot_id,
+                from,
+                channel_id,
+                Message::Marker { from, snapshot_id },
+                self.state,
+                if self.has_token { "YES" } else { "NO" });
+            }
         }
         let encoded_buffer = bincode::serialize(&msg).map_err(|_| Reasons::BadMessage)?;
         sender.write_all(&encoded_buffer).map_err(Reasons::IO)?;
         Ok(())
     }
 
-    fn send_to_channel(
-        &mut self,
-        outgoing_channels: &mut Channels,
-        channel_id: usize,
-        msg: Message,
-    ) -> Result<(), Reasons> {
-        self.send_message(
-            outgoing_channels.get_mut(&channel_id).unwrap(),
-            msg,
-            channel_id,
-        )
-    }
-
     // Passes the token to the successive process
     pub fn pass_token(&mut self, outgoing_channels: &mut Channels) -> Result<(), Reasons> {
-        self.send_to_channel(outgoing_channels, self.successor, Message::Token)
+        self.send_message(
+            outgoing_channels.get_mut(&self.successor).unwrap(),
+            Message::Token,
+            self.successor,
+        )
     }
 }
 

@@ -72,10 +72,7 @@ fn main() -> Result<(), Reasons> {
     loop {
         // check if we're ready to begin the snapshot
         if let (Some(snapshot_id), Some(activate_state)) = (args.snapshot_id, args.snapshot_delay) {
-            if !data.seen_marker
-                && data.desired_snapshot == snapshot_id
-                && data.state == activate_state
-            {
+            if !data.snapshots.contains_key(&snapshot_id) && data.state == activate_state {
                 data.initiate_snapshot(&mut outgoing_channels, snapshot_id)?;
             }
         }
@@ -101,12 +98,6 @@ fn main() -> Result<(), Reasons> {
             let msg: Message = deserialize(&buffer[..b]).map_err(|_| Reasons::BadMessage)?;
             message_queue.push(msg);
         }
-
-        // sort so that Markers are FIFO
-        message_queue.sort_by_key(|msg| match msg {
-            Message::Marker { .. } => 0,
-            Message::Token => 1,
-        });
 
         for msg in message_queue {
             data.recv_message(msg, incoming_channels.len());
